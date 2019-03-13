@@ -33,4 +33,4 @@ file_put_contents(isset($argv[2]) ? $argv[2] : $argv[1], $data);
 
 
 // Result...
-print "Original size: $source_size, Result size: $target_size\n";
+print "Original size: $source_size, Result size: $target_size.".($source_size == $target_size ? ' Nothing changed.' : '')."\n";

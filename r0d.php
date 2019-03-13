@@ -29,8 +29,11 @@ $data = remove_utf8_bom($data);
 $data = strip_char($data, "\r"); // // \r = chr(13) = carriage return. (We don't want \r\n, we'd like to have only \n.)
 
 $target_size = strlen($data);
-file_put_contents(isset($argv[2]) ? $argv[2] : $argv[1], $data);
-
 
 // Result...
-print "Original size: $source_size, Result size: $target_size.".($source_size == $target_size ? ' Nothing changed.' : '')."\n";
+if ($source_size == $target_size)
+  print "Nothing changed.\n";
+else {
+  file_put_contents(isset($argv[2]) ? $argv[2] : $argv[1], $data);
+  print "Original size: $source_size, Result size: $target_size.\n";
+}

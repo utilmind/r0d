@@ -5,7 +5,7 @@ r0d is tiny command-line tool that strips odd characters from code or text files
 <ul>
   <li><b>r0d.php</b> -- main script which makes required actions done.</li>
   <li><b>r0d.bat</b> -- batch file to easily executed it in Windows environment. WARNING! You need to edit update path to "r0d.php" before usage!!</li>
-  <li><b>r0d.pas</b> -- (not used) legacy Pascal code from 1996. It's console application (originally written for 16-bit DOS) which strips \r (#$0d) characters from files. Stored here just because of little</li>
+  <li><b>r0d.pas</b> -- (not used) legacy Pascal code from 1996. It's console application (originally written for 16-bit DOS) which strips \r (#$0d) characters from files. It's NOT used anymore and stored here just because of little nostalgy.</li>
 </ul>
 
 <p>CHANGES LOG:</p>

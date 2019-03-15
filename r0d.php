@@ -22,16 +22,25 @@ function strip_char($t, $char) {
 
 
 // GO!
+$data_changed = false;
 $data = file_get_contents($argv[1]);
 $source_size = strlen($data);
 
 $data = remove_utf8_bom($data);
-$data = strip_char($data, "\r"); // // \r = chr(13) = carriage return. (We don't want \r\n, we'd like to have only \n.)
+
+if (strpos($data, "\r") !== false) {
+  // if file contains \r, but has no \n, let's replace all \r to \n.
+  if (strpos($data, "\n") === false) {
+    $data = str_replace("\r", "\n", $data);
+    $data_changed = true;
+  }else
+    $data = strip_char($data, "\r"); // // \r = chr(13) = carriage return. (We don't want \r\n, we'd like to have only \n.)
+}
 
 $target_size = strlen($data);
 
 // Result...
-if ($source_size == $target_size)
+if (!$data_changed && ($source_size == $target_size))
   print "Nothing changed.\n";
 else {
   file_put_contents(isset($argv[2]) ? $argv[2] : $argv[1], $data);

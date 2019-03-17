@@ -37,6 +37,9 @@ if (strpos($data, "\r") !== false) {
     $data = strip_char($data, "\r"); // // \r = chr(13) = carriage return. (We don't want \r\n, we'd like to have only \n.)
 }
 
+// remove spaces and tabs before the end of each line.
+$data = preg_replace("/[ \t]+\n/", "\n", $data);
+
 $target_size = strlen($data);
 
 // Result...

@@ -38,7 +38,7 @@ if (strpos($data, "\r") !== false) {
 }
 
 // remove spaces and tabs before the end of each line.
-$data = preg_replace("/[ \t]+\n/", "\n", $data);
+$data = preg_replace("/[ \t]+(\n|$)/", "$1", $data);
 
 $target_size = strlen($data);
 

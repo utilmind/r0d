@@ -2,9 +2,9 @@
 $allow_extensions = array(
   'php', 'js', 'css', 'html', 'htm', 'shtml',
   'txt', 'md', 'conf', 'ini', 'htaccess',
-  'pas', 'c', 'cpp', 'h',
   'pl', 'cgi', 'asp', 'py', 'sh', 'bat',
   'xml', 'json', 'svg',
+  // 'pas', 'c', 'cpp', 'h', // NO! Some legacy IDEs doesn't supports /n without /r.
 );
 
 if (!isset($argv[1])) {

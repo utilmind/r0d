@@ -10,6 +10,7 @@ r0d is tiny command-line tool that strips odd characters from code or text files
 
 <p>CHANGES LOG:</p>
 <ul>
+  <li>20.04.2019: Added conversion of the character set. Eg cp1251 to UTF8 or wise versa.</li>
   <li>30.03.2019: Added wildcarded bulk optimization, including recursive directory optimization.</li>
   <li>17.03.2019: Now it removes all spaces and tabs before the end of each line.</li>
   <li>13.03.2019: Originally it strips \r characters and UTF-8 BOM prefix (&#65279 character) from the UTF-8 encoded files.</li>

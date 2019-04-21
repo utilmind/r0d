@@ -59,7 +59,7 @@ foreach ($argv as $arg) {
 
 
 // Check
-if ((!$is_wildcard = (strpos($source_file, '*') !== false)) && !file_exists($source_file)) {
+if ((!$is_wildcard = (strpos($source_file, '*') !== false)) && (!file_exists($source_file) || is_dir($source_file))) {
   print "File \"$source_file\" not found.\n";
   exit;
 }

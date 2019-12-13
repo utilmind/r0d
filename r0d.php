@@ -108,7 +108,8 @@ function r0d_file($source_file, $target_file = false) {
     }
 
     $target_size = strlen($data);
-  }
+  }else
+    $target_size = 0;
 
   // Result...
   if ($data_changed = ($data_changed || ($data && ($source_size != $target_size)))) {

@@ -1,4 +1,4 @@
-{ AK: this is ancient code for Borland Pascal from 1996. Don't use it. It's here just for example. }
+{ AK: this is ancient code for Borland Pascal from 1996. Don't use it. It's here just for nostalgy. }
 
 {$I-}
 var

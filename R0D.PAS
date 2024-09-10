@@ -1,3 +1,5 @@
+{ AK: this is ancient code for Borland Pascal from 1996. Don't use it. It's here just for example. }
+
 {$I-}
 var
   SourceFile, TargetFile: Text;
@@ -10,6 +12,7 @@ Begin
     WriteLn('USAGE: r0d.exe <source_file>');
     Halt;
    end;
+
   Assign(SourceFile, ParamStr(1));
   Reset(SourceFile);
   if IOResult <> 0 then
@@ -24,6 +27,7 @@ Begin
     WriteLn('Disk Error');
     Halt;
    end;
+
   WriteLn('Converting '+ParamStr(1) + '....');
   SourceBytes := 0;
   TargetBytes := 0;
@@ -39,7 +43,8 @@ Begin
    end;
   Close(SourceFile);
   Close(TargetFile);
-  Erase(SourceFile);
+  {Erase(SourceFile);}
+
   Rename(TargetFile, ParamStr(1));
   if IOResult <> 0 then
    begin

@@ -1,9 +1,12 @@
 <?php
+// TODO:
+//    Skip too large files!!! Don't try to read something, that will obviously exceeds the memory limit!
+
 static $allow_extensions = [
-        'php', 'js', 'jsx', 'vue', 'css', 'scss', 'less', 'html', 'htm', 'shtml', 'phtml',
+        'php', 'js', 'jsx', 'ts', 'tsx', 'vue', 'css', 'scss', 'less', 'html', 'htm', 'shtml', 'phtml',
         'txt', 'md', 'conf', 'ini', 'htaccess', 'htpasswd', 'gitignore', 'sql',
-        'pl', 'cgi', 'asp', 'py', 'sh', 'bat', 'ps1', // 'pas',
-        'xml', 'csv', 'json', 'svg',
+        'pl', 'cgi', 'asp', 'py', 'go', 'sh', 'bat', 'ps1', // 'pas',
+        'xml', 'csv', 'json', 'yaml', 'svg', 'glsl',
         'pem', 'ppk', 'yml',
         // 'pas', 'c', 'cpp', 'h', // NO! Some legacy IDEs doesn't supports /n without /r.
     ];

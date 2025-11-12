@@ -12,8 +12,6 @@
  * recursively scanning subdirectories if requested. It also supports
  * reporting-only mode without actually modifying the files.
  */
-// TODO:
-//    Skip too large files!!! Don't try to read something, that will obviously exceeds the memory limit!
 
 static $allow_extensions = [
         'php', 'js', 'jsx', 'ts', 'tsx', 'vue', 'css', 'scss', 'less', 'html', 'htm', 'shtml', 'phtml',
@@ -42,7 +40,6 @@ Options:
   -s or -r: process subdirectories
   -c:src_charset~target_charset: convert from specified charset into another. If target_charset not specified, file converted to UTF-8.
                                  WARNING! double conversion is possible if conversion is not from or into UTF-8.
-  -i: inform about possible optimization/convertion without optimization/convertion.
 END;
   exit;
 }
@@ -51,7 +48,6 @@ $source_file = '';
 $target_file = '';
 $process_subdirectories = false;
 $convert_charset = false;
-$inform_only = false;
 
 unset($argv[0]);
 foreach ($argv as $arg) {
@@ -65,11 +61,6 @@ foreach ($argv as $arg) {
             $charsets = explode('~', substr($option, 2));
             $convert_charset = strtolower($charsets[0]);
             $convert_charset_target = isset($charsets[1]) ? strtolower($charsets[1]) : 'utf-8';
-            continue;
-        }
-
-        if ($option === 'i') {
-            $inform_only = true;
             continue;
         }
     }
@@ -90,131 +81,112 @@ if ((!$is_wildcard = (strpos($source_file, '*') !== false)) && (!file_exists($so
 }
 
 
-// TOOLS
-
 /**
- * Convert PHP memory_limit shorthand notation (like "128M", "1G", "512K")
- * into raw bytes. Returns -1 for unlimited memory.
- *
- * @return int
+ * Streamed line-ending normalization: CRLF -> LF, then lone CR -> LF.
+ * Uses chunked I/O to avoid loading the whole file into memory.
+ * Returns [bool $changed, string $message].
  */
-function get_memory_limit_bytes() {
-    $limit = ini_get('memory_limit');
+function r0d_file_stream(string $source,            // source file name
+                        ?string $target = null,     // target file name (source_name.tmp if not specified)
+                        ?string $src_encoding = null,            // source encoding
+                        ?string $dst_encoding = null): array {   // target encoding
+    $in = fopen($source, 'rb');
+    if (!$in) {
+        return [false, "Failed to open \"$source\" for reading.\n"];
+    }
+    $source_size = filesize($source);
 
-    if ($limit === false || $limit === '' || $limit == -1) {
-        // -1 means "no memory limit"
-        return -1;
+    $tmp = $target ?: $source . '.tmp';
+    $out = fopen($tmp, 'wb');
+    if (!$out) {
+        fclose($in);
+        return [false, "Failed to open \"$tmp\" for writing.\n"];
     }
 
-    $limit = trim($limit);
-    $unit = strtolower(substr($limit, -1));
-    if ($unit === 'g' || $unit === 'm' || $unit === 'k') {
-        $value = (int) substr($limit, 0, -1);
-    } else {
-        // No unit, already in bytes
-        $value = (int) $limit;
-        $unit = '';
+    $changed = false;
+    $carry = '';              // keep trailing \r across chunk boundaries
+    $chunkSize = 4 * 1024 * 1024; // 4MB chunks; adjust if needed
+
+   // Strip UTF-8 BOM if present (EF BB BF) ---
+    $prefix = fread($in, 3);
+    if ($prefix === "\xEF\xBB\xBF") { // BOM found — skip it
+        $changed = true;
+
+    // No BOM — keep whatever we read as the start of the stream
+    }elseif ($prefix !== false) {
+        $carry = $prefix; // put first 3 bytes to output stream.
     }
 
-    switch ($unit) {
-        case 'g':
-            $value *= 1024 * 1024 * 1024;
-            break;
-        case 'm':
-            $value *= 1024 * 1024;
-            break;
-        case 'k':
-            $value *= 1024;
-            break;
-    }
-
-    return $value;
-}
-
-function remove_utf8_bom($t) {
-    $bom = pack('H*', 'EFBBBF');
-    return preg_replace("/^$bom/", '', $t);
-}
-
-function strip_char($t, $char) {
-    return preg_replace("/$char/", '', $t);
-}
-
-function r0d_file($source_file, $target_file = false) {
-    global $convert_charset, $convert_charset_target, $inform_only;
-
-    if (!file_exists($source_file)) {
-        die("File \"$source_file\" not found.\n");
-    }
-
-    // --- New: check file size against PHP memory_limit ---
-    $memory_limit = get_memory_limit_bytes();
-    if ($memory_limit > 0) {
-        $file_size = filesize($source_file);
-        if ($file_size !== false && $file_size > $memory_limit) {
-            die(
-                "File \"$source_file\" is too large ($file_size bytes) for current memory_limit (" .
-                ini_get('memory_limit') . ").\n"
-            );
+    while (!feof($in)) {
+        $buf = fread($in, $chunkSize);
+        if ($buf === false) {
+            $buf = ''; // it must be a string
         }
-    }
-    // --- End of new part ---
 
-    $data_changed = false;
-    if ($data = file_get_contents($source_file)) {
-        $source_size = strlen($data);
-
-        $data = remove_utf8_bom($data);
-
-        if (strpos($data, "\r") !== false) {
-            // If file contains \r, but has no \n (Mac linebreaks), let's replace all \r to \n.
-            // Otherwise -- just remove \r's.
-            $data = false === strpos($data, "\n")
-                ? str_replace("\r", "\n", $data)
-                : $data = strip_char($data, "\r"); // \r = carriage return. We don't want \r\n, we'd like to have only \n.
-            $data_changed = true;
-        }else {
-            $old_len = strlen($data);
+        if ($carry !== '') {
+            $buf = $carry . $buf;
+            $carry = '';
         }
+
+        // CRLF (Windows linebreaks) -> LF first
+        $buf2 = str_replace("\r\n", "\n", $buf);
+
+        // If chunk ends with \r, postpone it (could be part of CRLF split across chunks)
+        if ($buf2 !== '' && substr($buf2, -1) === "\r") {
+            $carry = "\r"; // move to the next chunk
+            $buf2 = substr($buf2, 0, -1);
+        }
+
+        // Lone CR (Mac linebreaks) -> LF
+        $buf2 = str_replace("\r", "\n", $buf2);
 
         // remove spaces and tabs before the end of each line.
-        $data = preg_replace('/[ \x00\xa0\t]+(\n|$)/', "$1", $data);
-        if (!$data_changed && ($old_len !== strlen($data))) {
-            $data_changed = true;
-        }
+        //$data = preg_replace('/[ \x00\xa0\t]+(\n|$)/', "$1", $data);
 
-        // If you want restore Windows EOLs instead of LF, uncomment the next line
-        // $data = str_replace("\n", "\r\n", $data);
-
-        if ($convert_charset) {
-            // already in target encoding?
-            $skip_encoding =
-                (($convert_charset_target === 'utf-8') && mb_check_encoding($data, $convert_charset_target))
-                || (($convert_charset === 'utf-8') && !mb_check_encoding($data, $convert_charset));
-
-            if (!$skip_encoding && ($r = iconv($convert_charset, $convert_charset_target, $data))) {
-                $data = $r;
+        // Optional: encoding conversion (streamed best-effort)
+        // AK 2025-11-12: we did it differently in older versions. See Git repo before 2025.
+        if ($src_encoding && $dst_encoding) {
+            $converted = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $buf2);
+            if ($converted !== false) {
+                if ($converted !== $buf2) {
+                    $changed = true;
+                }
+                $buf2 = $converted;
             }
         }
 
-        $target_size = strlen($data);
-    }else {
-        $target_size = 0;
-    }
-
-    // Result...
-    if ($data_changed = ($data_changed || ($data && ($source_size != $target_size)))) {
-        if ($inform_only) {
-            $inform_only = ' (unchanged)';
-        }else {
-            file_put_contents($target_file ? $target_file : $source_file, $data);
+        if ($buf2 !== $buf) {
+            $changed = true;
         }
-        $out = "$source_file: Original size: $source_size, Result size: $target_size.$inform_only\n";
-    }else {
-        $out = "Nothing changed. Same size: $target_size.\n";
+
+        if (fwrite($out, $buf2) === false) {
+            fclose($in);
+            fclose($out);
+            @unlink($tmp);
+            return [false, "Failed to write to \"$tmp\".\n"];
+        }
     }
 
-    return [$data_changed, $out];
+    if ($carry === "\r") {
+        fwrite($out, "\n");
+        $changed = true;
+    }
+
+    fclose($in);
+    fclose($out);
+
+    if (!$target && !@rename($tmp, $source)) {
+        @unlink($tmp);
+        return [false, "Failed to overwrite \"$source\".\n"];
+    }
+
+    if ($changed) {
+        $target_size = filesize($tmp);
+        $out = "Original size: $source_size, Result size: $target_size";
+    }else {
+        $msg = 'not changed';
+    }
+    return [$changed, "$source: $msg.\n"];
 }
 
 function r0d_dir($dir_mask, $check_subdirs = false) {
@@ -226,7 +198,7 @@ function r0d_dir($dir_mask, $check_subdirs = false) {
                 if (!in_array(pathinfo($f, PATHINFO_EXTENSION), $allow_extensions)) {
                     continue;
                 }
-                $out = r0d_file($f);
+                $out = r0d_file_stream($f);
                 if ($out[0]) {
                     echo $out[1];
                 }
@@ -249,6 +221,6 @@ if ($is_wildcard) {
     }
     */
 }else {
-    $out = r0d_file($source_file, $target_file);
+    $out = r0d_file_stream($source_file, $target_file);
     echo $out[1];
 }

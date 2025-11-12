@@ -104,17 +104,17 @@ function r0d_file_stream(string $source,            // source file name
     }
 
     $changed = false;
-    $carry = '';              // keep trailing \r across chunk boundaries
+    $carry = '';                 // keep trailing \r across chunk boundaries (or 3 first bytes if no UTF-8 BOM)
+    $lineCarry = '';             // incomplete line between chunks (for correctly removing trailing spaces)
     $chunkSize = 4 * 1024 * 1024; // 4MB chunks; adjust if needed
 
-   // Strip UTF-8 BOM if present (EF BB BF) ---
+    // Strip UTF-8 BOM if present (EF BB BF)
     $prefix = fread($in, 3);
-    if ($prefix === "\xEF\xBB\xBF") { // BOM found — skip it
+    if ($prefix === "\xEF\xBB\xBF") { // UTF-8 BOM found â€” skip it
         $changed = true;
-
-    // No BOM — keep whatever we read as the start of the stream
+    // No BOM â€” keep whatever we read as the start of the stream
     }elseif ($prefix !== false) {
-        $carry = $prefix; // put first 3 bytes to output stream.
+        $carry = $prefix; // put first 3 bytes to output stream (will be added to the 1st chunk)
     }
 
     while (!feof($in)) {
@@ -140,18 +140,39 @@ function r0d_file_stream(string $source,            // source file name
         // Lone CR (Mac linebreaks) -> LF
         $buf2 = str_replace("\r", "\n", $buf2);
 
-        // remove spaces and tabs before the end of each line.
-        //$data = preg_replace('/[ \x00\xa0\t]+(\n|$)/', "$1", $data);
+        // ---- Remove trailing spaces/tabs/NUL/NBSP at end of each line, streaming-safe ----
+        // Merge it with the tail of the previous chunk, then cut it at \n,
+        // Clean only FULL lines (adding \n back), and move the unfinished line to $lineCarry.
+        if ($lineCarry !== '') {
+            $buf2 = $lineCarry . $buf2;
+            $lineCarry = '';
+        }
+
+        $parts = explode("\n", $buf2);
+        $last  = array_pop($parts); // can be incomplete line (w/o \n)
+
+        $outChunk = '';
+        foreach ($parts as $line) {
+            // Remove: space, tab, NUL, and also UTF-8 NBSP (\xC2\xA0) in the END of line
+            $clean = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $line);
+            if ($clean !== $line) {
+                $changed = true;
+            }
+            $outChunk .= $clean . "\n";
+        }
+        // Move the unterminated line to $lineCarry (without the \n); we'll clean it up/write it later
+        $lineCarry = $last;
+        // ---- end of line trimming ----
 
         // Optional: encoding conversion (streamed best-effort)
         // AK 2025-11-12: we did it differently in older versions. See Git repo before 2025.
-        if ($src_encoding && $dst_encoding) {
-            $converted = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $buf2);
+        if ($src_encoding && $dst_encoding && $outChunk !== '') {
+            $converted = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $outChunk);
             if ($converted !== false) {
-                if ($converted !== $buf2) {
+                if ($converted !== $outChunk) {
                     $changed = true;
                 }
-                $buf2 = $converted;
+                $outChunk = $converted;
             }
         }
 
@@ -159,7 +180,7 @@ function r0d_file_stream(string $source,            // source file name
             $changed = true;
         }
 
-        if (fwrite($out, $buf2) === false) {
+        if ($outChunk !== '' && fwrite($out, $outChunk) === false) {
             fclose($in);
             fclose($out);
             @unlink($tmp);
@@ -167,8 +188,36 @@ function r0d_file_stream(string $source,            // source file name
         }
     }
 
+    // Finalization: If there is an unfinished line left, we will clean up the trailing spaces and write it down.
+    if ($lineCarry !== '') {
+        $tail = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $lineCarry);
+        if ($tail !== $lineCarry) {
+            $changed = true;
+        }
+        if ($src_encoding && $dst_encoding && $tail !== '') {
+            $conv = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $tail);
+            if ($conv !== false) {
+                if ($conv !== $tail) { $changed = true; }
+                $tail = $conv;
+            }
+        }
+        if ($tail !== '' && fwrite($out, $tail) === false) {
+            fclose($in);
+            fclose($out);
+            @unlink($tmp);
+            return [false, "Failed to write to \"$tmp\".\n"];
+        }
+        $lineCarry = '';
+    }
+
+    // If the last character of the file was \r (after normalization this becomes \n), we add a line feed.
     if ($carry === "\r") {
-        fwrite($out, "\n");
+        if (fwrite($out, "\n") === false) {
+            fclose($in);
+            fclose($out);
+            @unlink($tmp);
+            return [false, "Failed to write final newline to \"$tmp\".\n"];
+        }
         $changed = true;
     }
 
@@ -180,9 +229,12 @@ function r0d_file_stream(string $source,            // source file name
         return [false, "Failed to overwrite \"$source\".\n"];
     }
 
+    // Final message
     if ($changed) {
-        $target_size = filesize($tmp);
-        $out = "Original size: $source_size, Result size: $target_size";
+        $result_path = $target ?: $source; // Where it's written
+        $target_size = @filesize($result_path);
+
+        $msg = "Original size: $source_size, Result size: $target_size";
     }else {
         $msg = 'not changed';
     }

@@ -1,4 +1,17 @@
 <?php
+/**
+ * r0d.php
+ *
+ * (c) utilmind, 1999-2025
+ *
+ * Command-line utility to normalize line endings in text files.
+ * It replaces Windows CRLF (\r\n) and classic Mac CR (\r) line endings
+ * with Unix-style LF (\n) only and can optionally convert file encodings.
+ *
+ * The script can process a single file or a set of files by wildcard mask,
+ * recursively scanning subdirectories if requested. It also supports
+ * reporting-only mode without actually modifying the files.
+ */
 // TODO:
 //    Skip too large files!!! Don't try to read something, that will obviously exceeds the memory limit!
 
@@ -14,9 +27,16 @@ static $allow_extensions = [
 
 // gettings arguments
 if (!is_array($argv) || ($i = count($argv)) < 2) {
+    $base_php = basename($argv[0]);
     echo <<<END
-Usage: r0d.php [options] [filename or mask] [output filename (optionally)]
+r0d: Remover of 0x0D characters from text/code files.
+Converts Windows and Mac-specific linebreaks (\r\n and \r) into Unix-style (\n).
+Also it trims the lines, removing odd spaces before the linebreaks.
+
+Usage: $base_php [options] [filename or mask] [output filename (optionally)]
 r0d.php [mask, like *.php, or * to find all files with allowed extensions (including hidden files, .htaccess, etc)] [-r (to process subdirectories, if directory names match mask)]
+
+ATTN! It skips too large files which PHP obviously can't process due to memory limit. Increase memory limit to process huge files.
 
 Options:
   -s or -r: process subdirectories
@@ -69,7 +89,48 @@ if ((!$is_wildcard = (strpos($source_file, '*') !== false)) && (!file_exists($so
     die("File \"$source_file\" not found.\n");
 }
 
+
 // TOOLS
+
+/**
+ * Convert PHP memory_limit shorthand notation (like "128M", "1G", "512K")
+ * into raw bytes. Returns -1 for unlimited memory.
+ *
+ * @return int
+ */
+function get_memory_limit_bytes() {
+    $limit = ini_get('memory_limit');
+
+    if ($limit === false || $limit === '' || $limit == -1) {
+        // -1 means "no memory limit"
+        return -1;
+    }
+
+    $limit = trim($limit);
+    $unit = strtolower(substr($limit, -1));
+    if ($unit === 'g' || $unit === 'm' || $unit === 'k') {
+        $value = (int) substr($limit, 0, -1);
+    } else {
+        // No unit, already in bytes
+        $value = (int) $limit;
+        $unit = '';
+    }
+
+    switch ($unit) {
+        case 'g':
+            $value *= 1024 * 1024 * 1024;
+            break;
+        case 'm':
+            $value *= 1024 * 1024;
+            break;
+        case 'k':
+            $value *= 1024;
+            break;
+    }
+
+    return $value;
+}
+
 function remove_utf8_bom($t) {
     $bom = pack('H*', 'EFBBBF');
     return preg_replace("/^$bom/", '', $t);
@@ -82,6 +143,23 @@ function strip_char($t, $char) {
 function r0d_file($source_file, $target_file = false) {
     global $convert_charset, $convert_charset_target, $inform_only;
 
+    if (!file_exists($source_file)) {
+        die("File \"$source_file\" not found.\n");
+    }
+
+    // --- New: check file size against PHP memory_limit ---
+    $memory_limit = get_memory_limit_bytes();
+    if ($memory_limit > 0) {
+        $file_size = filesize($source_file);
+        if ($file_size !== false && $file_size > $memory_limit) {
+            die(
+                "File \"$source_file\" is too large ($file_size bytes) for current memory_limit (" .
+                ini_get('memory_limit') . ").\n"
+            );
+        }
+    }
+    // --- End of new part ---
+
     $data_changed = false;
     if ($data = file_get_contents($source_file)) {
         $source_size = strlen($data);
@@ -89,23 +167,30 @@ function r0d_file($source_file, $target_file = false) {
         $data = remove_utf8_bom($data);
 
         if (strpos($data, "\r") !== false) {
-            // if file contains \r, but has no \n, let's replace all \r to \n.
-            if (strpos($data, "\n") === false) {
-                $data = str_replace("\r", "\n", $data);
-                $data_changed = true;
-            }else {
-                $data = strip_char($data, "\r"); // // \r = chr(13) = carriage return. (We don't want \r\n, we'd like to have only \n.)
-            }
+            // If file contains \r, but has no \n (Mac linebreaks), let's replace all \r to \n.
+            // Otherwise -- just remove \r's.
+            $data = false === strpos($data, "\n")
+                ? str_replace("\r", "\n", $data)
+                : $data = strip_char($data, "\r"); // \r = carriage return. We don't want \r\n, we'd like to have only \n.
+            $data_changed = true;
+        }else {
+            $old_len = strlen($data);
         }
 
         // remove spaces and tabs before the end of each line.
         $data = preg_replace('/[ \x00\xa0\t]+(\n|$)/', "$1", $data);
+        if (!$data_changed && ($old_len !== strlen($data))) {
+            $data_changed = true;
+        }
 
-        // now try to recode the charset, if required
+        // If you want restore Windows EOLs instead of LF, uncomment the next line
+        // $data = str_replace("\n", "\r\n", $data);
+
         if ($convert_charset) {
             // already in target encoding?
-            $skip_encoding = (($convert_charset_target === 'utf-8') && mb_check_encoding($data, $convert_charset_target))
-                            || (($convert_charset === 'utf-8') && !mb_check_encoding($data, $convert_charset));
+            $skip_encoding =
+                (($convert_charset_target === 'utf-8') && mb_check_encoding($data, $convert_charset_target))
+                || (($convert_charset === 'utf-8') && !mb_check_encoding($data, $convert_charset));
 
             if (!$skip_encoding && ($r = iconv($convert_charset, $convert_charset_target, $data))) {
                 $data = $r;
@@ -147,7 +232,7 @@ function r0d_dir($dir_mask, $check_subdirs = false) {
                 }
             }elseif ($check_subdirs) {
                 // if (($f !== '.') && ($f !== '..'))
-                r0d_dir($f.'/'.basename($dir_mask), $check_subdirs);
+                r0d_dir($f . '/' . basename($dir_mask), $check_subdirs);
             }
         }
     }

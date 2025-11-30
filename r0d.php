@@ -180,6 +180,7 @@ function r0d_file_stream(string $source,            // source file name
             $changed = true;
         }
 
+        $outChunk = (string)$outChunk; // avoid NULLs
         if ($outChunk !== '' && fwrite($out, $outChunk) === false) {
             fclose($in);
             fclose($out);
@@ -201,6 +202,7 @@ function r0d_file_stream(string $source,            // source file name
                 $tail = $conv;
             }
         }
+        $tail = (string)$tail; // avoid NULLs
         if ($tail !== '' && fwrite($out, $tail) === false) {
             fclose($in);
             fclose($out);

@@ -81,6 +81,14 @@ if ((!$is_wildcard = (strpos($source_file, '*') !== false)) && (!file_exists($so
 }
 
 
+// Helper
+function fwrite_nonempty($h, $s) {
+    $s = (string)$s; // avoid NULLs
+    return $s === ''
+        ? true
+        : (fwrite($h, $s) !== false);
+}
+
 /**
  * Streamed line-ending normalization: CRLF -> LF, then lone CR -> LF.
  * Uses chunked I/O to avoid loading the whole file into memory.
@@ -180,8 +188,7 @@ function r0d_file_stream(string $source,            // source file name
             $changed = true;
         }
 
-        $outChunk = (string)$outChunk; // avoid NULLs
-        if ($outChunk !== '' && fwrite($out, $outChunk) === false) {
+        if (fwrite_nonempty($out, $outChunk)) {
             fclose($in);
             fclose($out);
             @unlink($tmp);
@@ -202,8 +209,7 @@ function r0d_file_stream(string $source,            // source file name
                 $tail = $conv;
             }
         }
-        $tail = (string)$tail; // avoid NULLs
-        if ($tail !== '' && fwrite($out, $tail) === false) {
+        if (fwrite_nonempty($out, $tail)) {
             fclose($in);
             fclose($out);
             @unlink($tmp);

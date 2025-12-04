@@ -81,30 +81,57 @@ if ((!$is_wildcard = (strpos($source_file, '*') !== false)) && (!file_exists($so
 }
 
 
-// Helper
-function fwrite_nonempty($h, $s) {
-    $s = (string)$s; // avoid NULLs
-    return $s === ''
-        ? true
-        : (fwrite($h, $s) !== false);
-}
-
 /**
  * Streamed line-ending normalization: CRLF -> LF, then lone CR -> LF.
+ * Trims trailing spaces/tabs/NUL/NBSP before LF in a streaming-safe way.
  * Uses chunked I/O to avoid loading the whole file into memory.
  * Returns [bool $changed, string $message].
  */
-function r0d_file_stream(string $source,            // source file name
-                        ?string $target = null,     // target file name (source_name.tmp if not specified)
-                        ?string $src_encoding = null,            // source encoding
-                        ?string $dst_encoding = null): array {   // target encoding
+function r0d_file_stream(
+                    string $source,                 // source file name
+                    ?string $target = null,         // target file name (source_dir\source_name.tmp if not specified)
+                    ?string $src_encoding = null,   // source encoding
+                    ?string $dst_encoding = null    // target encoding
+                ): array {
+
+    // Robust write: write whole $data with partial-write handling and small retries.
+    $write_all = function($h, $data) {
+            $data = (string)$data;
+            $len  = strlen($data);
+            if ($len === 0) return true;
+            $off = 0;
+            $retries = 0;
+            while ($off < $len) {
+                $w = @fwrite($h, substr($data, $off));
+                if ($w === false) {
+                    if ($retries < 5) { usleep(2000); ++$retries; continue; }
+                    return false;
+                }
+                if ($w === 0) { // non-blocking hiccup or external interference
+                    if ($retries < 5) { usleep(2000); ++$retries; continue; }
+                    return false;
+                }
+                $off += $w;
+                $retries = 0;
+            }
+            return true;
+        };
+
     $in = fopen($source, 'rb');
     if (!$in) {
         return [false, "Failed to open \"$source\" for reading.\n"];
     }
-    $source_size = filesize($source);
+    $source_size = @filesize($source);
 
-    $tmp = $target ?: $source . '.tmp';
+    // Place tmp right next to the source to avoid cross-dir perms
+    if ($target) {
+        $tmp = $target;
+    }else {
+        $dir  = dirname($source);
+        $base = basename($source);
+        $tmp  = $dir . DIRECTORY_SEPARATOR . $base . '.tmp';
+    }
+
     $out = fopen($tmp, 'wb');
     if (!$out) {
         fclose($in);
@@ -117,12 +144,11 @@ function r0d_file_stream(string $source,            // source file name
     $chunkSize = 4 * 1024 * 1024; // 4MB chunks; adjust if needed
 
     // Strip UTF-8 BOM if present (EF BB BF)
-    $prefix = fread($in, 3);
+    $prefix = fread($in, 3); // read first 3 bytes (presumably UTF-8 BOM)
     if ($prefix === "\xEF\xBB\xBF") { // UTF-8 BOM found — skip it
-        $changed = true;
-    // No BOM — keep whatever we read as the start of the stream
+        $changed = true; // BOM removed
     }elseif ($prefix !== false) {
-        $carry = $prefix; // put first 3 bytes to output stream (will be added to the 1st chunk)
+        $carry = $prefix; // prepend to first chunk
     }
 
     while (!feof($in)) {
@@ -136,67 +162,56 @@ function r0d_file_stream(string $source,            // source file name
             $carry = '';
         }
 
-        // CRLF (Windows linebreaks) -> LF first
+        // Normalize line breaks: CRLF -> LF, then CR -> LF
         $buf2 = str_replace("\r\n", "\n", $buf);
 
-        // If chunk ends with \r, postpone it (could be part of CRLF split across chunks)
         if ($buf2 !== '' && substr($buf2, -1) === "\r") {
-            $carry = "\r"; // move to the next chunk
+            $carry = "\r"; // move CR to the next chunk (could be split CRLF)
             $buf2 = substr($buf2, 0, -1);
         }
 
         // Lone CR (Mac linebreaks) -> LF
         $buf2 = str_replace("\r", "\n", $buf2);
 
-        // ---- Remove trailing spaces/tabs/NUL/NBSP at end of each line, streaming-safe ----
-        // Merge it with the tail of the previous chunk, then cut it at \n,
-        // Clean only FULL lines (adding \n back), and move the unfinished line to $lineCarry.
-        if ($lineCarry !== '') {
-            $buf2 = $lineCarry . $buf2;
-            $lineCarry = '';
-        }
+        // --- streaming trim of trailing spaces/tabs/NUL/NBSP before LF ---
+        if ($lineCarry !== '') { $buf2 = $lineCarry . $buf2; $lineCarry = ''; }
 
         $parts = explode("\n", $buf2);
-        $last  = array_pop($parts); // can be incomplete line (w/o \n)
-
+        $last  = array_pop($parts); // may be an incomplete line (no \n)
         $outChunk = '';
+
         foreach ($parts as $line) {
-            // Remove: space, tab, NUL, and also UTF-8 NBSP (\xC2\xA0) in the END of line
+            // Remove ASCII space, TAB, NUL, and UTF-8 NBSP at EOL
             $clean = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $line);
-            if ($clean !== $line) {
-                $changed = true;
-            }
+            if ($clean !== $line) { $changed = true; }
             $outChunk .= $clean . "\n";
         }
-        // Move the unterminated line to $lineCarry (without the \n); we'll clean it up/write it later
-        $lineCarry = $last;
-        // ---- end of line trimming ----
 
-        // Optional: encoding conversion (streamed best-effort)
-        // AK 2025-11-12: we did it differently in older versions. See Git repo before 2025.
+        // Keep incomplete tail for the next chunk
+        $lineCarry = $last;
+        // --- end streaming trim ---
+
+        // Optional: encoding conversion (best-effort)
         if ($src_encoding && $dst_encoding && $outChunk !== '') {
             $converted = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $outChunk);
             if ($converted !== false) {
-                if ($converted !== $outChunk) {
-                    $changed = true;
-                }
+                if ($converted !== $outChunk) { $changed = true; }
                 $outChunk = $converted;
             }
         }
 
-        if ($buf2 !== $buf) {
-            $changed = true;
-        }
+        // Mark changes if line-end normalization altered the buffer
+        if ($buf2 !== $buf) { $changed = true; }
 
-        if (fwrite_nonempty($out, $outChunk)) {
-            fclose($in);
-            fclose($out);
-            @unlink($tmp);
-            return [false, "Failed to write to \"$tmp\".\n"];
+        if ($outChunk !== '') {
+            if (!$write_all($out, $outChunk)) {
+                fclose($in); fclose($out); @unlink($tmp);
+                return [false, "Failed to write to \"$tmp\".\n"];
+            }
         }
     }
 
-    // Finalization: If there is an unfinished line left, we will clean up the trailing spaces and write it down.
+    // Flush the last (possibly unterminated) line: trim trailing spaces/tabs/NUL/NBSP and write without adding LF
     if ($lineCarry !== '') {
         $tail = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $lineCarry);
         if ($tail !== $lineCarry) {
@@ -209,43 +224,48 @@ function r0d_file_stream(string $source,            // source file name
                 $tail = $conv;
             }
         }
-        if (fwrite_nonempty($out, $tail)) {
-            fclose($in);
-            fclose($out);
-            @unlink($tmp);
-            return [false, "Failed to write to \"$tmp\".\n"];
+
+        if ($tail !== '') {
+            if (!$write_all($out, $tail)) {
+                fclose($in); fclose($out); @unlink($tmp);
+                return [false, "Failed to write to \"$tmp\".\n"];
+            }
         }
         $lineCarry = '';
     }
 
-    // If the last character of the file was \r (after normalization this becomes \n), we add a line feed.
+    // If last byte was a bare '\r' carried over, finalize with LF
     if ($carry === "\r") {
-        if (fwrite($out, "\n") === false) {
-            fclose($in);
-            fclose($out);
-            @unlink($tmp);
+        if (!$write_all($out, "\n")) {
+            fclose($in); fclose($out); @unlink($tmp);
             return [false, "Failed to write final newline to \"$tmp\".\n"];
         }
         $changed = true;
     }
 
+    // Close handles
+    fflush($out);
     fclose($in);
     fclose($out);
 
-    if (!$target && !@rename($tmp, $source)) {
-        @unlink($tmp);
-        return [false, "Failed to overwrite \"$source\".\n"];
-    }
-
-    // Final message
-    if ($changed) {
-        $result_path = $target ?: $source; // Where it's written
-        $target_size = @filesize($result_path);
-
-        $msg = "Original size: $source_size, Result size: $target_size";
+    // Overwrite source if no explicit target
+    if (!$target) {
+        // On Windows, ensure tmp and source are on same volume/dir for atomic rename.
+        if (!@rename($tmp, $source)) {
+            @unlink($tmp);
+            return [false, "Failed to overwrite \"$source\".\n"];
+        }
+        $result_path = $source;
     }else {
-        $msg = 'not changed';
+        $result_path = $target;
     }
+
+    clearstatcache(true, $result_path);
+    $target_size = @filesize($result_path);
+    $msg = $changed
+        ? "Original size: $source_size, Result size: $target_size"
+        : "not changed";
+
     return [$changed, "$source: $msg.\n"];
 }
 

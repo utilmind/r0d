@@ -22,6 +22,18 @@ static $allow_extensions = [
         // 'pas', 'c', 'cpp', 'h', // NO! Some legacy IDEs doesn't supports /n without /r.
     ];
 
+// Directories that should be skipped during recursive processing (-s / -r)
+$exclude_directories = [
+    'cache',
+    '.cache',
+    '_pycache__',
+    '.git',
+    '_temp',
+    'temp',
+    'tmp',
+    'node_modules',
+];
+
 
 // gettings arguments
 if (!is_array($argv) || ($i = count($argv)) < 2) {
@@ -269,20 +281,84 @@ function r0d_file_stream(
     return [$changed, "$source: $msg.\n"];
 }
 
+/**
+ * Check whether the given path is inside an excluded directory.
+ *
+ * The check is based on individual path segments (case-insensitive),
+ * so any path containing one of the excluded directory names as a segment
+ * will be treated as excluded. For example:
+ *   /project/node_modules/package/index.js
+ * will be excluded if "node_modules" is in $exclude_directories.
+ */
+function is_path_excluded(string $path): bool {
+    global $exclude_directories;
+
+    if (empty($exclude_directories)) {
+        return false;
+    }
+
+    // Normalize path separators and trim leading/trailing slashes
+    $normalized = str_replace('\\', '/', $path);
+    $normalized = trim($normalized, '/');
+    $normalized = strtolower($normalized);
+
+    // Split normalized path into segments
+    $segments = explode('/', $normalized);
+
+    // Build a lookup set of excluded directory names (lowercased)
+    static $excludedSet = null;
+    if ($excludedSet === null) {
+        $excludedSet = [];
+        foreach ($exclude_directories as $dir) {
+            $dir = trim($dir);
+            if ($dir === '') {
+                continue;
+            }
+            $excludedSet[strtolower($dir)] = true;
+        }
+    }
+
+    // If any path segment matches an excluded directory, the path is excluded
+    foreach ($segments as $segment) {
+        if (isset($excludedSet[$segment])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function r0d_dir($dir_mask, $check_subdirs = false) {
     global $allow_extensions;
 
     if ($fn = glob($dir_mask)) {
         foreach ($fn as $f) {
+            // Skip any paths that are inside excluded directories
+            if (is_path_excluded($f)) {
+                continue;
+            }
+
             if (!is_dir($f)) {
-                if (!in_array(pathinfo($f, PATHINFO_EXTENSION), $allow_extensions)) {
+                // Process only files with allowed extensions
+                $ext = pathinfo($f, PATHINFO_EXTENSION);
+                if ($ext === '') {
                     continue;
                 }
+                if (!in_array($ext, $allow_extensions, true)) {
+                    continue;
+                }
+
                 $out = r0d_file_stream($f);
                 if ($out[0]) {
                     echo $out[1];
                 }
             }elseif ($check_subdirs) {
+                // When recursive mode is enabled, do not descend into excluded directories
+                if (is_path_excluded($f)) {
+                    continue;
+                }
+
+                // Use the same basename pattern for subdirectories
                 // if (($f !== '.') && ($f !== '..'))
                 r0d_dir($f . '/' . basename($dir_mask), $check_subdirs);
             }

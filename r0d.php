@@ -26,7 +26,7 @@ static $allow_extensions = [
 $exclude_directories = [
     'cache',
     '.cache',
-    '_pycache__',
+    '__pycache__',
     '.git',
     '_temp',
     'temp',
@@ -106,26 +106,35 @@ function r0d_file_stream(
                     ?string $dst_encoding = null    // target encoding
                 ): array {
 
-    // Robust write: write whole $data with partial-write handling and small retries.
-    $write_all = function($h, $data) {
+    // Helper: robust write that handles partial writes and retries.
+    $write_all = function ($handle, $data): bool {
             $data = (string)$data;
             $len  = strlen($data);
-            if ($len === 0) return true;
-            $off = 0;
-            $retries = 0;
-            while ($off < $len) {
-                $w = @fwrite($h, substr($data, $off));
-                if ($w === false) {
-                    if ($retries < 5) { usleep(2000); ++$retries; continue; }
-                    return false;
-                }
-                if ($w === 0) { // non-blocking hiccup or external interference
-                    if ($retries < 5) { usleep(2000); ++$retries; continue; }
-                    return false;
-                }
-                $off += $w;
-                $retries = 0;
+            if ($len === 0) {
+                return true; // nothing to write
             }
+
+            $offset  = 0;
+            $retries = 0;
+
+            while ($offset < $len) {
+                $chunk = substr($data, $offset);
+                $written = @fwrite($handle, $chunk);
+
+                if ($written === false || $written === 0) {
+                    // Allow a few short retries in case of transient issues (non-blocking I/O, AV, etc.)
+                    if ($retries < 5) {
+                        usleep(2000); // 2ms
+                        ++$retries;
+                        continue;
+                    }
+                    return false;
+                }
+
+                $offset  += $written;
+                $retries  = 0;
+            }
+
             return true;
         };
 
@@ -133,12 +142,13 @@ function r0d_file_stream(
     if (!$in) {
         return [false, "Failed to open \"$source\" for reading.\n"];
     }
+
     $source_size = @filesize($source);
 
-    // Place tmp right next to the source to avoid cross-dir perms
+    // Place tmp file in the same directory as the source to avoid cross-volume issues.
     if ($target) {
         $tmp = $target;
-    }else {
+    } else {
         $dir  = dirname($source);
         $base = basename($source);
         $tmp  = $dir . DIRECTORY_SEPARATOR . $base . '.tmp';
@@ -150,17 +160,19 @@ function r0d_file_stream(
         return [false, "Failed to open \"$tmp\" for writing.\n"];
     }
 
-    $changed = false;
-    $carry = '';                 // keep trailing \r across chunk boundaries (or 3 first bytes if no UTF-8 BOM)
-    $lineCarry = '';             // incomplete line between chunks (for correctly removing trailing spaces)
-    $chunkSize = 4 * 1024 * 1024; // 4MB chunks; adjust if needed
+    $changed    = false;
+    $carry      = '';                  // carries trailing "\r" or initial prefix bytes
+    $lineCarry  = '';                  // carries an unfinished line between chunks
+    $chunkSize  = 4 * 1024 * 1024;     // 4 MB chunks; adjust as needed
 
-    // Strip UTF-8 BOM if present (EF BB BF)
-    $prefix = fread($in, 3); // read first 3 bytes (presumably UTF-8 BOM)
-    if ($prefix === "\xEF\xBB\xBF") { // UTF-8 BOM found — skip it
-        $changed = true; // BOM removed
-    }elseif ($prefix !== false) {
-        $carry = $prefix; // prepend to first chunk
+    // Strip UTF-8 BOM (EF BB BF) if present at the very beginning
+    $prefix = fread($in, 3);
+    if ($prefix === "\xEF\xBB\xBF") {
+        // BOM found — skip it
+        $changed = true;
+    } elseif ($prefix !== false && $prefix !== '') {
+        // No BOM — prepend these bytes to the first chunk
+        $carry = $prefix;
     }
 
     while (!feof($in)) {
@@ -169,106 +181,141 @@ function r0d_file_stream(
             $buf = ''; // it must be a string
         }
 
+        // Detect CR/CRLF in the original chunk before any modifications.
+        // If there was at least one "\r", line endings will be normalized.
+        $hadCR = (strpos($buf, "\r") !== false);
+
+        // Prepend any carried-over prefix (BOM-less prefix or split CR)
         if ($carry !== '') {
             $buf = $carry . $buf;
             $carry = '';
         }
 
-        // Normalize line breaks: CRLF -> LF, then CR -> LF
+        // Normalize line endings: first CRLF -> LF
         $buf2 = str_replace("\r\n", "\n", $buf);
 
+        // If the chunk ends with a bare "\r", carry it over (could be split CRLF)
         if ($buf2 !== '' && substr($buf2, -1) === "\r") {
-            $carry = "\r"; // move CR to the next chunk (could be split CRLF)
-            $buf2 = substr($buf2, 0, -1);
+            $carry = "\r";
+            $buf2  = substr($buf2, 0, -1);
         }
 
-        // Lone CR (Mac linebreaks) -> LF
+        // Then convert any remaining lone CR -> LF
         $buf2 = str_replace("\r", "\n", $buf2);
 
-        // --- streaming trim of trailing spaces/tabs/NUL/NBSP before LF ---
-        if ($lineCarry !== '') { $buf2 = $lineCarry . $buf2; $lineCarry = ''; }
+        // Mark that line endings were changed if original chunk contained CR
+        if ($hadCR) {
+            $changed = true;
+        }
 
+        // --- Streaming trim of trailing spaces/tabs/NUL/NBSP at end of each line ---
+        // Prepend any unfinished line from previous chunk
+        if ($lineCarry !== '') {
+            $buf2      = $lineCarry . $buf2;
+            $lineCarry = '';
+        }
+
+        // Split by LF, keep the last fragment as a potentially incomplete line
         $parts = explode("\n", $buf2);
-        $last  = array_pop($parts); // may be an incomplete line (no \n)
+        $last  = array_pop($parts); // may be an incomplete line (no trailing LF)
+
         $outChunk = '';
 
         foreach ($parts as $line) {
-            // Remove ASCII space, TAB, NUL, and UTF-8 NBSP at EOL
+            // Remove trailing: space, tab, NUL, and UTF-8 NBSP (\xC2\xA0)
             $clean = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $line);
-            if ($clean !== $line) { $changed = true; }
+            if ($clean !== $line) {
+                $changed = true;
+            }
             $outChunk .= $clean . "\n";
         }
 
-        // Keep incomplete tail for the next chunk
+        // Keep the last fragment as unfinished line for the next iteration
         $lineCarry = $last;
-        // --- end streaming trim ---
+        // --- End streaming trim ---
 
-        // Optional: encoding conversion (best-effort)
+        // Optional: encoding conversion on the chunk that is ready to be written
         if ($src_encoding && $dst_encoding && $outChunk !== '') {
             $converted = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $outChunk);
             if ($converted !== false) {
-                if ($converted !== $outChunk) { $changed = true; }
+                if ($converted !== $outChunk) {
+                    $changed = true;
+                }
                 $outChunk = $converted;
             }
         }
 
-        // Mark changes if line-end normalization altered the buffer
-        if ($buf2 !== $buf) { $changed = true; }
-
+        // Write out the processed chunk, if any
         if ($outChunk !== '') {
             if (!$write_all($out, $outChunk)) {
-                fclose($in); fclose($out); @unlink($tmp);
+                fclose($in);
+                fclose($out);
+                @unlink($tmp);
                 return [false, "Failed to write to \"$tmp\".\n"];
             }
         }
     }
 
-    // Flush the last (possibly unterminated) line: trim trailing spaces/tabs/NUL/NBSP and write without adding LF
+    // Flush the last (possibly unterminated) line:
+    // apply trailing-space trim and optional encoding conversion, then write it without adding LF.
     if ($lineCarry !== '') {
         $tail = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $lineCarry);
         if ($tail !== $lineCarry) {
             $changed = true;
         }
+
         if ($src_encoding && $dst_encoding && $tail !== '') {
             $conv = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $tail);
             if ($conv !== false) {
-                if ($conv !== $tail) { $changed = true; }
+                if ($conv !== $tail) {
+                    $changed = true;
+                }
                 $tail = $conv;
             }
         }
 
         if ($tail !== '') {
             if (!$write_all($out, $tail)) {
-                fclose($in); fclose($out); @unlink($tmp);
+                fclose($in);
+                fclose($out);
+                @unlink($tmp);
                 return [false, "Failed to write to \"$tmp\".\n"];
             }
         }
+
         $lineCarry = '';
     }
 
-    // If last byte was a bare '\r' carried over, finalize with LF
+    // If a bare "\r" was left in carry at the very end, finalize it as LF
     if ($carry === "\r") {
         if (!$write_all($out, "\n")) {
-            fclose($in); fclose($out); @unlink($tmp);
+            fclose($in);
+            fclose($out);
+            @unlink($tmp);
             return [false, "Failed to write final newline to \"$tmp\".\n"];
         }
         $changed = true;
     }
 
-    // Close handles
+    // Close handles and decide what to do with tmp file
     fflush($out);
     fclose($in);
     fclose($out);
 
-    // Overwrite source if no explicit target
-    if (!$target) {
-        // On Windows, ensure tmp and source are on same volume/dir for atomic rename.
-        if (!@rename($tmp, $source)) {
+    if ($target === null) {
+        // In-place mode: if nothing changed, remove tmp and keep original as-is
+        if (!$changed) {
             @unlink($tmp);
-            return [false, "Failed to overwrite \"$source\".\n"];
+            $result_path = $source;
+        } else {
+            if (!@rename($tmp, $source)) {
+                @unlink($tmp);
+                return [false, "Failed to overwrite \"$source\".\n"];
+            }
+            $result_path = $source;
         }
-        $result_path = $source;
-    }else {
+    } else {
+        // Target path explicitly specified: tmp == target, keep it even if unchanged
         $result_path = $target;
     }
 

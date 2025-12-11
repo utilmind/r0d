@@ -302,27 +302,30 @@ function r0d_file_stream(
     fclose($in);
     fclose($out);
 
-    if ($target === null) {
-        // In-place mode: if nothing changed, remove tmp and keep original as-is
-        if (!$changed) {
+    // Overwrite source if no explicit target
+    if (!$target) {
+        // On Windows, ensure tmp and source are on same volume/dir for atomic rename.
+        if (!@rename($tmp, $source)) {
             @unlink($tmp);
-            $result_path = $source;
-        } else {
-            if (!@rename($tmp, $source)) {
-                @unlink($tmp);
-                return [false, "Failed to overwrite \"$source\".\n"];
-            }
-            $result_path = $source;
+            return [false, "Failed to overwrite \"$source\".\n"];
         }
+        $result_path = $source;
     } else {
-        // Target path explicitly specified: tmp == target, keep it even if unchanged
         $result_path = $target;
     }
 
     clearstatcache(true, $result_path);
+
+    // Safely get target size; handle failure explicitly
     $target_size = @filesize($result_path);
+    if ($target_size === false) {
+        $target_size_str = 'unknown';
+    } else {
+        $target_size_str = $target_size;
+    }
+
     $msg = $changed
-        ? "Original size: $source_size, Result size: $target_size"
+        ? "Original size: $source_size, Result size: $target_size_str"
         : "not changed";
 
     return [$changed, "$source: $msg.\n"];

@@ -178,15 +178,9 @@ function win_set_attrib_flags(string $path, ?array $flags): bool {
 
 
 /**
- * Streamed line-ending normalization and trailing whitespace trim.
- *
- * Internally normalizes input to LF (\n) for processing, then outputs the desired
- * linebreak sequence ($linebreak_seq) to support Windows (CRLF), Unix (LF),
- * and classic Mac (CR).
- *
- * Also trims trailing spaces/tabs/NUL/NBSP at end of each line (stream-safe).
- * Optionally converts encoding.
- *
+ * Streamed line-ending normalization: CRLF -> LF, then lone CR -> LF.
+ * Trims trailing spaces/tabs/NUL/NBSP before LF in a streaming-safe way.
+ * Uses chunked I/O to avoid loading the whole file into memory.
  * Returns [bool $changed, string $message].
  */
 function r0d_file_stream(
@@ -196,13 +190,14 @@ function r0d_file_stream(
                     ?string $dst_encoding = null    // target encoding
                 ): array {
 
-    // Use the desired output EOL from global config (set by CLI option).
-    // Fallback to LF if not set.
     global $linebreak_seq;
-    $eol = isset($linebreak_seq) ? (string)$linebreak_seq : "\n";
-    if ($eol !== "\n" && $eol !== "\r" && $eol !== "\r\n") {
-        $eol = "\n";
-    }
+
+    // Desired linebreak bytes to write (e.g. "\r\n", "\r", or "\n")
+    $desired_lb = $linebreak_seq;
+
+    // Track whether the source already uses the desired linebreak format (so we can avoid touching mtime if nothing changes)
+    $lb_ok = true;
+    $prevWasCR = false; // for validating CRLF across chunk boundaries
 
     // Helper: robust write that handles partial writes and retries.
     $write_all = function ($handle, $data): bool {
@@ -242,11 +237,13 @@ function r0d_file_stream(
     }
 
     $source_size = @filesize($source);
+    $orig_win_attrib = win_get_attrib_flags($source);
+    $orig_perms = @fileperms($source); // useful on non-Windows too
 
     // Place tmp file in the same directory as the source to avoid cross-volume issues.
     if ($target) {
         $tmp = $target;
-    }else {
+    } else {
         $dir  = dirname($source);
         $base = basename($source);
         $tmp  = $dir . DIRECTORY_SEPARATOR . $base . '.tmp';
@@ -259,19 +256,18 @@ function r0d_file_stream(
     }
 
     $changed    = false;
-    $carry      = '';               // carries trailing "\r" or initial prefix bytes
-    $lineCarry  = '';               // carries an unfinished line between chunks
-    $chunkSize  = 4 * 1024 * 1024;  // 4 MB chunks; adjust as needed
+    $carry      = '';                  // carries trailing "\r" or initial prefix bytes
+    $lineCarry  = '';                  // carries an unfinished line between chunks
+    $chunkSize  = 4 * 1024 * 1024;     // 4 MB chunks; adjust as needed
 
-    // For CRLF detection across chunk boundaries (original stream analysis).
-    $prevWasCR_in_original = false;
-
-    // Strip UTF-8 BOM (EF BB BF) if present at the very beginning.
+    // Strip UTF-8 BOM (EF BB BF) if present at the very beginning
     $prefix = fread($in, 3);
     if ($prefix === "\xEF\xBB\xBF") {
-        $changed = true; // BOM removed
-    }elseif ($prefix !== false && $prefix !== '') {
-        $carry = $prefix; // No BOM found. Prepend read byes to first chunk.
+        // BOM found — skip it
+        $changed = true;
+    } elseif ($prefix !== false && $prefix !== '') {
+        // No BOM — prepend these bytes to the first chunk
+        $carry = $prefix;
     }
 
     while (!feof($in)) {
@@ -280,90 +276,51 @@ function r0d_file_stream(
             $buf = ''; // it must be a string
         }
 
-        // --- Decide whether EOL conversion is needed based on ORIGINAL data ---
-        // If output EOL is LF: any CR implies changes
-        // If output EOL is CR: any LF implies changes
-        // If output EOL is CRLF: any lone LF or lone CR implies changes
-        if ($eol === "\n") {
-            if (strpos($buf, "\r") !== false) {
-                $changed = true;
-            }
-        }elseif ($eol === "\r") {
-            if (strpos($buf, "\n") !== false) {
-                $changed = true;
-            }
-        }else { // $eol === "\r\n"
-            // Streaming check: mark changed only if we see a lone LF or lone CR.
-            // State machine is based on original bytes and supports chunk boundaries.
-            $len = strlen($buf);
-            for ($i = 0; $i < $len; ++$i) {
-                $ch = $buf[$i];
-                if ($ch === "\r") {
-                    $prevWasCR_in_original = true;
-                    continue;
-                }
-                if ($ch === "\n") {
-                    // LF not preceded by CR -> lone LF -> must change
-                    if (!$prevWasCR_in_original) {
-                        $changed = true;
-                    }
-                    $prevWasCR_in_original = false;
-                    continue;
-                }
-
-                // Any non-LF char after CR -> lone CR -> must change
-                if ($prevWasCR_in_original) {
-                    $changed = true;
-                    $prevWasCR_in_original = false;
-                }
-            }
-            // If the chunk ends with CR, keep state for the next chunk (could be CRLF split).
-        }
-        // --- End original EOL analysis ---
-
-        // Prepend carried bytes (BOM-less prefix or split CR)
+        // Prepend any carried-over prefix (BOM-less prefix or split CR)
         if ($carry !== '') {
             $buf = $carry . $buf;
             $carry = '';
         }
 
-        // Normalize line endings internally to LF for trimming and streaming logic.
+        // Normalize line endings: first CRLF -> LF
         $buf2 = str_replace("\r\n", "\n", $buf);
 
-        // If the chunk ends with a bare "\r", carry it over (could be split CRLF).
+        // If the chunk ends with a bare "\r", carry it over (could be split CRLF)
         if ($buf2 !== '' && substr($buf2, -1) === "\r") {
             $carry = "\r";
             $buf2  = substr($buf2, 0, -1);
         }
 
-        // Convert any remaining lone CR -> LF.
+        // Then convert any remaining lone CR -> LF
         $buf2 = str_replace("\r", "\n", $buf2);
 
         // --- Streaming trim of trailing spaces/tabs/NUL/NBSP at end of each line ---
+        // Prepend any unfinished line from previous chunk
         if ($lineCarry !== '') {
             $buf2      = $lineCarry . $buf2;
             $lineCarry = '';
         }
 
+        // Split by LF, keep the last fragment as a potentially incomplete line
         $parts = explode("\n", $buf2);
-        $last  = array_pop($parts); // may be an incomplete line
+        $last  = array_pop($parts); // may be an incomplete line (no trailing LF)
 
         $outChunk = '';
+
         foreach ($parts as $line) {
             // Remove trailing: space, tab, NUL, and UTF-8 NBSP (\xC2\xA0)
             $clean = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $line);
             if ($clean !== $line) {
                 $changed = true;
             }
-
-            // IMPORTANT: write the desired output EOL (CRLF/CR/LF), not always LF.
-            $outChunk .= $clean . $eol;
+            $outChunk .= $clean . $desired_lb;
         }
 
+        // Keep the last fragment as unfinished line for the next iteration
         $lineCarry = $last;
         // --- End streaming trim ---
 
-        // Optional: encoding conversion on the chunk ready to be written.
+        // Optional: encoding conversion on the chunk that is ready to be written
         if ($src_encoding && $dst_encoding && $outChunk !== '') {
             $converted = @iconv($src_encoding, $dst_encoding . '//TRANSLIT', $outChunk);
             if ($converted !== false) {
@@ -374,6 +331,7 @@ function r0d_file_stream(
             }
         }
 
+        // Write out the processed chunk, if any
         if ($outChunk !== '') {
             if (!$write_all($out, $outChunk)) {
                 fclose($in);
@@ -384,7 +342,8 @@ function r0d_file_stream(
         }
     }
 
-    // Flush the last (possibly unterminated) line without appending EOL.
+    // Flush the last (possibly unterminated) line:
+    // apply trailing-space trim and optional encoding conversion, then write it without adding LF.
     if ($lineCarry !== '') {
         $tail = preg_replace('/(?:[ \t\x00]|(?:\xC2\xA0))+$/', '', $lineCarry);
         if ($tail !== $lineCarry) {
@@ -413,10 +372,9 @@ function r0d_file_stream(
         $lineCarry = '';
     }
 
-    // If a bare "\r" remained at the end (split CRLF that never got LF), finalize it.
-    // Output the chosen EOL sequence here as well.
+    // If a bare "\r" was left in carry at the very end, finalize it as LF
     if ($carry === "\r") {
-        if (!$write_all($out, $eol)) {
+        if (!$write_all($out, $desired_lb)) {
             fclose($in);
             fclose($out);
             @unlink($tmp);
@@ -425,6 +383,18 @@ function r0d_file_stream(
         $changed = true;
     }
 
+    // Finalize CRLF validation at EOF
+    if ($lb_ok && $desired_lb === "\r\n" && $prevWasCR) {
+        // File ended with a bare CR
+        $lb_ok = false;
+    }
+
+    // If the source did not already match the desired linebreak format, mark as changed
+    if (!$lb_ok) {
+        $changed = true;
+    }
+
+    // Close handles and decide what to do with tmp file
     fflush($out);
     fclose($in);
     fclose($out);

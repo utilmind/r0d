@@ -94,6 +94,61 @@ if ((!$is_wildcard = (strpos($source_file, '*') !== false)) && (!file_exists($so
 
 
 /**
+ * Get Windows file attributes via "attrib" command.
+ * Returns an associative array like ['R'=>true,'H'=>true,'S'=>false,'A'=>true] or null on non-Windows/failure.
+ */
+function win_get_attrib_flags(string $path): ?array {
+    if (stripos(PHP_OS_FAMILY, 'Windows') === false) {
+        return null;
+    }
+
+    $cmd = 'attrib ' . escapeshellarg($path);
+    $out = @shell_exec($cmd);
+    if (!is_string($out) || $out === '') {
+        return null;
+    }
+
+    // Typical output starts with something like: "A  H   C:\path\file"
+    // We'll read flags from the beginning of the line.
+    $line = trim(str_replace(["\r", "\n"], '', $out));
+    $prefix = substr($line, 0, 10);
+
+    return [
+        'R' => (strpos($prefix, 'R') !== false), // Read-only
+        'H' => (strpos($prefix, 'H') !== false), // Hidden
+        'S' => (strpos($prefix, 'S') !== false), // System
+        'A' => (strpos($prefix, 'A') !== false), // Archive
+    ];
+}
+
+/**
+ * Apply Windows file attributes via "attrib" command.
+ * $flags is an array produced by win_get_attrib_flags().
+ * Returns true on success (or if not on Windows), false on failure.
+ */
+function win_set_attrib_flags(string $path, ?array $flags): bool {
+    if (stripos(PHP_OS_FAMILY, 'Windows') === false) {
+        return true;
+    }
+    if (!$flags) {
+        return true;
+    }
+
+    // Build attrib arguments: +H -H +R -R etc.
+    $args = [];
+    foreach (['R', 'H', 'S', 'A'] as $k) {
+        $args[] = ($flags[$k] ? "+$k" : "-$k");
+    }
+
+    $cmd = 'attrib ' . implode(' ', $args) . ' ' . escapeshellarg($path);
+    @shell_exec($cmd);
+
+    // Quick verification is optional; consider it "best effort"
+    return true;
+}
+
+
+/**
  * Streamed line-ending normalization: CRLF -> LF, then lone CR -> LF.
  * Trims trailing spaces/tabs/NUL/NBSP before LF in a streaming-safe way.
  * Uses chunked I/O to avoid loading the whole file into memory.
@@ -144,6 +199,8 @@ function r0d_file_stream(
     }
 
     $source_size = @filesize($source);
+    $orig_win_attrib = win_get_attrib_flags($source);
+    $orig_perms = @fileperms($source); // useful on non-Windows too
 
     // Place tmp file in the same directory as the source to avoid cross-volume issues.
     if ($target) {
@@ -306,10 +363,20 @@ function r0d_file_stream(
         // In-place mode: do not touch the original file if nothing actually changed.
         if (!$changed) { // Remove temp file and keep the original file (mtime stays unchanged).
             @unlink($tmp);
-            // Replace original file only when changes were made.
-        }elseif (!@rename($tmp, $source)) {
-            @unlink($tmp);
-            return [false, "Failed to overwrite \"$source\".\n"];
+
+        }else { // Replace original file only when changes were made.
+            if (!@rename($tmp, $source)) {
+                @unlink($tmp);
+                return [false, "Failed to overwrite \"$source\".\n"];
+            }
+
+            // Restore basic permissions if possible (mostly for non-Windows)
+            if ($orig_perms !== false) {
+                @chmod($source, $orig_perms & 0777);
+            }
+
+            // Restore Windows attributes (hidden/readonly/system/archive)
+            win_set_attrib_flags($source, $orig_win_attrib);
         }
         $result_path = $source;
     }else { // Target mode: keep the produced output file. (Optional: you can also skip write here if you want.)

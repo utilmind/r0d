@@ -242,6 +242,8 @@ function r0d_file_stream(
     }
 
     $source_size = @filesize($source);
+    $orig_win_attrib = win_get_attrib_flags($source);
+    $orig_perms = @fileperms($source); // useful on non-Windows too
 
     // Place tmp file in the same directory as the source to avoid cross-volume issues.
     if ($target) {
@@ -425,6 +427,7 @@ function r0d_file_stream(
         $changed = true;
     }
 
+    // Close handles and decide what to do with tmp file
     fflush($out);
     fclose($in);
     fclose($out);

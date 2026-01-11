@@ -67,30 +67,41 @@ $linebreak_hex = '0a';          // Default linebreak: 0a (LF) unless overridden 
 $linebreak_seq = "\n";          // Actual bytes to write as linebreak
 
 unset($argv[0]);
-foreach ($argv as $arg) {
+$args = array_values($argv);
+$argc = count($args);
+for ($i = 0; $i < $argc; ++$i) {
+    $arg = $args[$i];
     if (($arg[0] === '-') && ($arg !== '-')) {
 
         // Support both "-x" and "--x" forms
         $option = strtolower(substr($arg, substr($arg, 0, 2) === '--' ? 2 : 1));
 
-        // Long option: -linebreak=... (case-insensitive)
-        // Supported values:
-        //   0d0a | crlf | windows  -> "\r\n"
-        //   0a   | lf   | unix     -> "\n"
-        //   0d   | cr   | mac      -> "\r"
-        if (stripos($option, 'linebreak=') === 0) {
+        // --- linebreak option: allow both "linebreak=VALUE" and "linebreak VALUE"
+        if ($option === 'linebreak') {
+            // Next token is expected to be the value
+            $lb = ($i + 1 < $argc) ? strtolower($args[++$i]) : '';
+        }elseif (stripos($option, 'linebreak=') === 0) {
             $lb = strtolower(substr($option, strlen('linebreak=')));
+        }else {
+            $lb = null;
+        }
+
+         if ($lb !== null) {
+            // Supported values:
+            //   0d0a | crlf | windows  -> "\r\n"
+            //   0a   | lf   | unix     -> "\n"
+            //   0d   | cr   | mac      -> "\r"
             if ($lb === '0d0a' || $lb === 'crlf' || $lb === 'windows') {
                 $linebreak_hex = '0d0a';
                 $linebreak_seq = "\r\n";
-            }elseif ($lb === '0d' || $lb === 'cr' || $lb === 'mac') {
-                $linebreak_hex = '0d';
-                $linebreak_seq = "\r";
-            }elseif ($lb === '0a' || $lb === 'lf' || $lb === 'unix') { // but it's default
+            } elseif ($lb === '0a' || $lb === 'lf' || $lb === 'unix') {
                 $linebreak_hex = '0a';
                 $linebreak_seq = "\n";
-            }else {
-                die("Invalid -linebreak value: $lb. Use 0d0a|crlf|windows, 0a|lf|unix, or 0d|cr|mac.");
+            } elseif ($lb === '0d' || $lb === 'cr' || $lb === 'mac') {
+                $linebreak_hex = '0d';
+                $linebreak_seq = "\r";
+            } else {
+                die("Invalid -linebreak value: $lb. Use windows|crlf|0d0a, unix|lf|0a, or mac|cr|0d.\n");
             }
             continue;
         }

@@ -52,6 +52,7 @@ Options:
   -s or -r: process subdirectories
   -c:src_charset~target_charset: convert from specified charset into another. If target_charset not specified, file converted to UTF-8.
                                  WARNING! double conversion is possible if conversion is not from or into UTF-8.
+  -linebreak=0d|0a|0d0a|cr|lf|crlf|unix|mac|windows: desired linebreak bytes (case-insensitive). Default is 0d (aka LF).
 END;
   exit;
 }
@@ -61,9 +62,38 @@ $target_file = '';
 $process_subdirectories = false;
 $convert_charset = false;
 
+$linebreak_hex = '0d';          // Default linebreak: 0d (CR) unless overridden by --linebreak=
+$linebreak_seq = "\n";          // Actual bytes to write as linebreak
+
 unset($argv[0]);
 foreach ($argv as $arg) {
-    if (($arg[0] === '-') && ($option = strtolower(substr($arg, 1)))) {
+    if (($arg[0] === '-') && ($arg !== '-')) {
+
+        // Support both "-x" and "--x" forms
+        $option = strtolower(substr($arg, substr($arg, 0, 2) === '--' ? 2 : 1));
+
+        // Long option: -linebreak=... (case-insensitive)
+        // Supported values:
+        //   0d0a | crlf | windows  -> "\r\n"
+        //   0d   | cr   | unix     -> "\n"
+        //   0a   | lf   | mac      -> "\r"
+        if (stripos($option, 'linebreak=') === 0) {
+            $lb = strtolower(substr($option, strlen('linebreak=')));
+            if ($lb === '0d0a' || $lb === 'crlf' || $lb === 'windows') {
+                $linebreak_hex = '0d0a';
+                $linebreak_seq = "\r\n";
+            }elseif ($lb === '0a' || $lb === 'lf' || $lb === 'mac') {
+                $linebreak_hex = '0a';
+                $linebreak_seq = "\r";
+            //}elseif ($lb === '0d' || $lb === 'cr' || $lb === 'unix') {
+            //    $linebreak_hex = '0d';
+            //    $linebreak_seq = "\n";
+            }else {
+                die("Invalid -linebreak value: $lb. Use 0d0a|crlf|windows, 0d|cr|unix, or 0a|lf|mac.");
+            }
+            continue;
+        }
+
         if ($option === 's' || $option === 'r') {
             $process_subdirectories = true;
             continue;
@@ -84,7 +114,6 @@ foreach ($argv as $arg) {
         $target_file = $arg;
     }
 }
-
 
 
 // Check
@@ -160,6 +189,15 @@ function r0d_file_stream(
                     ?string $src_encoding = null,   // source encoding
                     ?string $dst_encoding = null    // target encoding
                 ): array {
+
+    global $linebreak_seq;
+
+    // Desired linebreak bytes to write (e.g. "\r\n", "\r", or "\n")
+    $desired_lb = $linebreak_seq;
+
+    // Track whether the source already uses the desired linebreak format (so we can avoid touching mtime if nothing changes)
+    $lb_ok = true;
+    $prevWasCR = false; // for validating CRLF across chunk boundaries
 
     // Helper: robust write that handles partial writes and retries.
     $write_all = function ($handle, $data): bool {
@@ -238,10 +276,6 @@ function r0d_file_stream(
             $buf = ''; // it must be a string
         }
 
-        // Detect CR/CRLF in the original chunk before any modifications.
-        // If there was at least one "\r", line endings will be normalized.
-        $hadCR = (strpos($buf, "\r") !== false);
-
         // Prepend any carried-over prefix (BOM-less prefix or split CR)
         if ($carry !== '') {
             $buf = $carry . $buf;
@@ -259,11 +293,6 @@ function r0d_file_stream(
 
         // Then convert any remaining lone CR -> LF
         $buf2 = str_replace("\r", "\n", $buf2);
-
-        // Mark that line endings were changed if original chunk contained CR
-        if ($hadCR) {
-            $changed = true;
-        }
 
         // --- Streaming trim of trailing spaces/tabs/NUL/NBSP at end of each line ---
         // Prepend any unfinished line from previous chunk
@@ -284,7 +313,7 @@ function r0d_file_stream(
             if ($clean !== $line) {
                 $changed = true;
             }
-            $outChunk .= $clean . "\n";
+            $outChunk .= $clean . $desired_lb;
         }
 
         // Keep the last fragment as unfinished line for the next iteration
@@ -345,12 +374,23 @@ function r0d_file_stream(
 
     // If a bare "\r" was left in carry at the very end, finalize it as LF
     if ($carry === "\r") {
-        if (!$write_all($out, "\n")) {
+        if (!$write_all($out, $desired_lb)) {
             fclose($in);
             fclose($out);
             @unlink($tmp);
             return [false, "Failed to write final newline to \"$tmp\".\n"];
         }
+        $changed = true;
+    }
+
+    // Finalize CRLF validation at EOF
+    if ($lb_ok && $desired_lb === "\r\n" && $prevWasCR) {
+        // File ended with a bare CR
+        $lb_ok = false;
+    }
+
+    // If the source did not already match the desired linebreak format, mark as changed
+    if (!$lb_ok) {
         $changed = true;
     }
 

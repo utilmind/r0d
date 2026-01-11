@@ -2,7 +2,7 @@
 /**
  * r0d.php
  *
- * (c) utilmind, 1999-2025
+ * (c) utilmind, 1999-2026
  *
  * Command-line utility to normalize line endings in text files.
  * It replaces Windows CRLF (\r\n) and classic Mac CR (\r) line endings
@@ -53,7 +53,7 @@ Options:
   -s or -r: process subdirectories
   -c:src_charset~target_charset: convert from specified charset into another. If target_charset not specified, file converted to UTF-8.
                                  WARNING! double conversion is possible if conversion is not from or into UTF-8.
-  -linebreak=0d|0a|0d0a|cr|lf|crlf|unix|mac|windows: desired linebreak bytes (case-insensitive). Default is 0d (aka LF).
+  -linebreak=0d|0a|0d0a|cr|lf|crlf|unix|mac|windows: desired linebreak bytes (case-insensitive). Default is 0a (aka LF).
 END;
   exit;
 }
@@ -63,7 +63,7 @@ $target_file = '';
 $process_subdirectories = false;
 $convert_charset = false;
 
-$linebreak_hex = '0d';          // Default linebreak: 0d (CR) unless overridden by --linebreak=
+$linebreak_hex = '0a';          // Default linebreak: 0a (LF) unless overridden by --linebreak=
 $linebreak_seq = "\n";          // Actual bytes to write as linebreak
 
 unset($argv[0]);
@@ -76,21 +76,21 @@ foreach ($argv as $arg) {
         // Long option: -linebreak=... (case-insensitive)
         // Supported values:
         //   0d0a | crlf | windows  -> "\r\n"
-        //   0d   | cr   | unix     -> "\n"
-        //   0a   | lf   | mac      -> "\r"
+        //   0a   | lf   | unix     -> "\n"
+        //   0d   | cr   | mac      -> "\r"
         if (stripos($option, 'linebreak=') === 0) {
             $lb = strtolower(substr($option, strlen('linebreak=')));
             if ($lb === '0d0a' || $lb === 'crlf' || $lb === 'windows') {
                 $linebreak_hex = '0d0a';
                 $linebreak_seq = "\r\n";
-            }elseif ($lb === '0a' || $lb === 'lf' || $lb === 'mac') {
-                $linebreak_hex = '0a';
+            }elseif ($lb === '0d' || $lb === 'cr' || $lb === 'mac') {
+                $linebreak_hex = '0d';
                 $linebreak_seq = "\r";
-            //}elseif ($lb === '0d' || $lb === 'cr' || $lb === 'unix') {
-            //    $linebreak_hex = '0d';
-            //    $linebreak_seq = "\n";
+            }elseif ($lb === '0a' || $lb === 'lf' || $lb === 'unix') { // but it's default
+                $linebreak_hex = '0a';
+                $linebreak_seq = "\n";
             }else {
-                die("Invalid -linebreak value: $lb. Use 0d0a|crlf|windows, 0d|cr|unix, or 0a|lf|mac.");
+                die("Invalid -linebreak value: $lb. Use 0d0a|crlf|windows, 0a|lf|unix, or 0d|cr|mac.");
             }
             continue;
         }
@@ -281,6 +281,44 @@ function r0d_file_stream(
         if ($carry !== '') {
             $buf = $carry . $buf;
             $carry = '';
+        }
+
+        // Check whether the source already uses the desired linebreak format.
+        // This allows us to skip in-place rewrite when only conversion was requested and the file is already compliant.
+        if ($lb_ok) {
+            if ($desired_lb === "\r\n") {
+                $len = strlen($buf);
+                for ($i = 0; $i < $len; ++$i) {
+                    $ch = $buf[$i];
+                    if ($prevWasCR) {
+                        if ($ch !== "\n") {
+                            $lb_ok = false; // Lone CR or CR not followed by LF
+                            break;
+                        }
+                        $prevWasCR = false;
+                        continue;
+                    }
+                    if ($ch === "\n") {
+                        $lb_ok = false; // Lone LF is not allowed in CRLF mode
+                        break;
+                    }
+                    if ($ch === "\r") {
+                        $prevWasCR = true;
+                    }
+                }
+            }elseif ($desired_lb === "\n") {
+                // Any CR (either lone CR or CRLF) means the file is not LF-only.
+                if (strpos($buf, "\r") !== false) {
+                    $lb_ok = false;
+                }
+                $prevWasCR = false; // Not used for LF-only mode
+            }else { // "\r"
+                // Any LF (either lone LF or CRLF) means the file is not CR-only.
+                if (strpos($buf, "\n") !== false) {
+                    $lb_ok = false;
+                }
+                $prevWasCR = false; // Not used for CR-only mode
+            }
         }
 
         // Normalize line endings: first CRLF -> LF

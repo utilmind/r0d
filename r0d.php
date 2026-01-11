@@ -52,7 +52,7 @@ Options:
   -s or -r: process subdirectories
   -c:src_charset~target_charset: convert from specified charset into another. If target_charset not specified, file converted to UTF-8.
                                  WARNING! double conversion is possible if conversion is not from or into UTF-8.
-  --linebreak=0d|0a|0d0a: desired linebreak bytes (case-insensitive). Default is 0d.
+  --linebreak=0d|0a|0d0a|cr|lf|crlf|unix|mac|windows: desired linebreak bytes (case-insensitive). Default is 0d (aka LF).
 END;
   exit;
 }
@@ -67,20 +67,30 @@ $linebreak_seq = "\r";          // Actual bytes to write as linebreak
 
 unset($argv[0]);
 foreach ($argv as $arg) {
-    // Long option: --linebreak=0d|0a|0d0a (case-insensitive)
+    // Long option: --linebreak=... (case-insensitive)
+    // Supported values:
+    //   0d0a | crlf | windows  -> "
+"
+    //   0d   | cr   | unix     -> ""
+    //   0a   | lf   | mac      -> "
+"
     if (stripos($arg, '--linebreak=') === 0) {
         $lb = strtolower(substr($arg, strlen('--linebreak=')));
-        if ($lb === '0d0a') {
+
+        if ($lb === '0d0a' || $lb === 'crlf' || $lb === 'windows') {
             $linebreak_hex = '0d0a';
-            $linebreak_seq = "\r\n";
-        } elseif ($lb === '0d') {
+            $linebreak_seq = "
+";
+        } elseif ($lb === '0d' || $lb === 'cr' || $lb === 'unix') {
             $linebreak_hex = '0d';
-            $linebreak_seq = "\r";
-        } elseif ($lb === '0a') {
+            $linebreak_seq = "";
+        } elseif ($lb === '0a' || $lb === 'lf' || $lb === 'mac') {
             $linebreak_hex = '0a';
-            $linebreak_seq = "\n";
+            $linebreak_seq = "
+";
         } else {
-            die("Invalid --linebreak value: $lb. Use 0d, 0a, or 0d0a.\n");
+            die("Invalid --linebreak value: $lb. Use 0d0a|crlf|windows, 0d|cr|unix, or 0a|lf|mac.
+");
         }
         continue;
     }

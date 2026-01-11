@@ -243,7 +243,7 @@ function r0d_file_stream(
     // Place tmp file in the same directory as the source to avoid cross-volume issues.
     if ($target) {
         $tmp = $target;
-    } else {
+    }else {
         $dir  = dirname($source);
         $base = basename($source);
         $tmp  = $dir . DIRECTORY_SEPARATOR . $base . '.tmp';
@@ -256,16 +256,16 @@ function r0d_file_stream(
     }
 
     $changed    = false;
-    $carry      = '';                  // carries trailing "\r" or initial prefix bytes
-    $lineCarry  = '';                  // carries an unfinished line between chunks
-    $chunkSize  = 4 * 1024 * 1024;     // 4 MB chunks; adjust as needed
+    $carry      = '';               // carries trailing "\r" or initial prefix bytes
+    $lineCarry  = '';               // carries an unfinished line between chunks
+    $chunkSize  = 4 * 1024 * 1024;  // 4 MB chunks; adjust as needed
 
     // Strip UTF-8 BOM (EF BB BF) if present at the very beginning
     $prefix = fread($in, 3);
     if ($prefix === "\xEF\xBB\xBF") {
         // BOM found — skip it
         $changed = true;
-    } elseif ($prefix !== false && $prefix !== '') {
+    }elseif ($prefix !== false && $prefix !== '') {
         // No BOM — prepend these bytes to the first chunk
         $carry = $prefix;
     }
@@ -430,8 +430,8 @@ function r0d_file_stream(
     $target_size_str = $target_size === false ? 'unknown' : $target_size;
 
     $msg = $changed
-        ? "Original size: $source_size, Result size: $target_size_str"
-        : 'not changed';
+            ? "Original size: $source_size, Result size: $target_size_str"
+            : 'not changed';
 
     return [$changed, "$source: $msg.\n"];
 }

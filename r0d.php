@@ -40,8 +40,9 @@ if (!is_array($argv) || ($i = count($argv)) < 2) {
     $base_php = basename($argv[0]);
     echo <<<END
 r0d: Remover of 0x0D characters from text/code files.
-Converts Windows and Mac-specific linebreaks (\r\n and \r) into Unix-style (\n).
 Also it trims the lines, removing odd spaces before the linebreaks.
+
+By default it converts Windows and Mac-specific linebreaks (\r\n and \r) into Unix-style (\n), but you can vary the linebreak style using the `-linebreak` option.
 
 Usage: $base_php [options] [filename or mask] [output filename (optionally)]
 r0d.php [mask, like *.php, or * to find all files with allowed extensions (including hidden files, .htaccess, etc)] [-r (to process subdirectories, if directory names match mask)]

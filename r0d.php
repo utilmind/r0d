@@ -52,7 +52,6 @@ Options:
   -s or -r: process subdirectories
   -c:src_charset~target_charset: convert from specified charset into another. If target_charset not specified, file converted to UTF-8.
                                  WARNING! double conversion is possible if conversion is not from or into UTF-8.
-  --linebreak=0d|0a|0d0a: desired linebreak bytes (case-insensitive). Default is 0d.
 END;
   exit;
 }
@@ -62,29 +61,8 @@ $target_file = '';
 $process_subdirectories = false;
 $convert_charset = false;
 
-$linebreak_hex = '0d';            // Default linebreak: 0d (CR) unless overridden by --linebreak=
-$linebreak_seq = "\r";          // Actual bytes to write as linebreak
-
 unset($argv[0]);
 foreach ($argv as $arg) {
-    // Long option: --linebreak=0d|0a|0d0a (case-insensitive)
-    if (stripos($arg, '--linebreak=') === 0) {
-        $lb = strtolower(substr($arg, strlen('--linebreak=')));
-        if ($lb === '0d0a') {
-            $linebreak_hex = '0d0a';
-            $linebreak_seq = "\r\n";
-        } elseif ($lb === '0d') {
-            $linebreak_hex = '0d';
-            $linebreak_seq = "\r";
-        } elseif ($lb === '0a') {
-            $linebreak_hex = '0a';
-            $linebreak_seq = "\n";
-        } else {
-            die("Invalid --linebreak value: $lb. Use 0d, 0a, or 0d0a.\n");
-        }
-        continue;
-    }
-
     if (($arg[0] === '-') && ($option = strtolower(substr($arg, 1)))) {
         if ($option === 's' || $option === 'r') {
             $process_subdirectories = true;
@@ -183,15 +161,6 @@ function r0d_file_stream(
                     ?string $dst_encoding = null    // target encoding
                 ): array {
 
-    global $linebreak_seq;
-
-    // Desired linebreak bytes to write (e.g. "\r\n", "\r", or "\n")
-    $desired_lb = $linebreak_seq;
-
-    // Track whether the source already uses the desired linebreak format (so we can avoid touching mtime if nothing changes)
-    $lb_ok = true;
-    $prevWasCR = false; // for validating CRLF across chunk boundaries
-
     // Helper: robust write that handles partial writes and retries.
     $write_all = function ($handle, $data): bool {
             $data = (string)$data;
@@ -269,6 +238,10 @@ function r0d_file_stream(
             $buf = ''; // it must be a string
         }
 
+        // Detect CR/CRLF in the original chunk before any modifications.
+        // If there was at least one "\r", line endings will be normalized.
+        $hadCR = (strpos($buf, "\r") !== false);
+
         // Prepend any carried-over prefix (BOM-less prefix or split CR)
         if ($carry !== '') {
             $buf = $carry . $buf;
@@ -286,6 +259,11 @@ function r0d_file_stream(
 
         // Then convert any remaining lone CR -> LF
         $buf2 = str_replace("\r", "\n", $buf2);
+
+        // Mark that line endings were changed if original chunk contained CR
+        if ($hadCR) {
+            $changed = true;
+        }
 
         // --- Streaming trim of trailing spaces/tabs/NUL/NBSP at end of each line ---
         // Prepend any unfinished line from previous chunk
@@ -306,7 +284,7 @@ function r0d_file_stream(
             if ($clean !== $line) {
                 $changed = true;
             }
-            $outChunk .= $clean . $desired_lb;
+            $outChunk .= $clean . "\n";
         }
 
         // Keep the last fragment as unfinished line for the next iteration
@@ -367,23 +345,12 @@ function r0d_file_stream(
 
     // If a bare "\r" was left in carry at the very end, finalize it as LF
     if ($carry === "\r") {
-        if (!$write_all($out, $desired_lb)) {
+        if (!$write_all($out, "\n")) {
             fclose($in);
             fclose($out);
             @unlink($tmp);
             return [false, "Failed to write final newline to \"$tmp\".\n"];
         }
-        $changed = true;
-    }
-
-    // Finalize CRLF validation at EOF
-    if ($lb_ok && $desired_lb === "\r\n" && $prevWasCR) {
-        // File ended with a bare CR
-        $lb_ok = false;
-    }
-
-    // If the source did not already match the desired linebreak format, mark as changed
-    if (!$lb_ok) {
         $changed = true;
     }
 

@@ -13,12 +13,27 @@
  * reporting-only mode without actually modifying the files.
  */
 
+static $allow_filenames = [
+    // Dotfiles
+    '.htaccess',
+    '.env',
+    '.gitignore',
+    '.dockerignore',
+    '.eslintrc',
+    '.npmrc',
+    '.nvmrc',
+
+    // No-extension files
+    'Dockerfile',
+];
+
 static $allow_extensions = [
         'php', 'js', 'jsx', 'ts', 'tsx', 'vue', 'css', 'scss', 'less', 'html', 'htm', 'shtml', 'phtml',
         'txt', 'md', 'conf', 'ini', 'htaccess', 'htpasswd', 'gitignore', 'sql',
         'pl', 'cgi', 'asp', 'py', 'go', 'sh', 'bat', 'ps1', // 'pas',
         'xml', 'csv', 'json', 'yaml', 'svg', 'glsl',
-        'pem', 'ppk', 'yml',
+        'pem', 'ppk', 'yml', 'Dockerfile',
+
         // 'pas', 'c', 'cpp', 'h', // NO! Some legacy IDEs doesn't supports /n without /r.
     ];
 
@@ -534,22 +549,55 @@ function is_path_excluded(string $path): bool {
 }
 
 function r0d_dir($dir_mask, $check_subdirs = false) {
-    global $allow_extensions;
+    global $allow_extensions, $allow_filenames;
 
-    if ($fn = glob($dir_mask)) {
-        foreach ($fn as $f) {
-            // Skip any paths that are inside excluded directories
-            if (is_path_excluded($f)) {
+    // Collect matches for both normal files and dotfiles.
+    // glob("*") does NOT match dotfiles (".env", ".gitignore", etc.), so we add an extra pattern.
+    $files = [];
+
+    $m1 = $dir_mask;
+    $files = glob($m1) ?: [];
+
+    // Build a dotfile pattern like ".*" or ".<basename>" in the same directory.
+    $dir  = dirname($dir_mask);
+    $base = basename($dir_mask);
+
+    // If the base already starts with ".", no need to duplicate.
+    if ($base !== '' && $base[0] !== '.') {
+        $m2 = ($dir === '.' ? '' : ($dir . '/')) . '.' . $base; // e.g. ".*", ".config*", etc.
+        $dot = glob($m2) ?: [];
+        if ($dot) {
+            $files = array_merge($files, $dot);
+        }
+    }
+
+    // Remove duplicates (can happen in edge cases)
+    if ($files) {
+        $files = array_values(array_unique($files));
+    }
+
+    if ($files) {
+        foreach ($files as $f) {
+            $name = basename($f);
+
+            // Skip pseudo-directories that can appear in glob(".*")
+            if ($name === '.'
+                    || $name === '..'
+                    // Skip any paths that are inside excluded directories
+                    || is_path_excluded($f)) {
                 continue;
             }
 
             if (!is_dir($f)) {
-                // Process only files with allowed extensions
+                // Decide whether the file is allowed:
+                // 1) explicit filename allow-list (for dotfiles and no-extension files)
+                // 2) extension allow-list
+                $isAllowedByName = in_array($name, $allow_filenames, true);
+
                 $ext = pathinfo($f, PATHINFO_EXTENSION);
-                if ($ext === '') {
-                    continue;
-                }
-                if (!in_array($ext, $allow_extensions, true)) {
+                $isAllowedByExt = ($ext !== '' && in_array($ext, $allow_extensions, true));
+
+                if (!$isAllowedByName && !$isAllowedByExt) {
                     continue;
                 }
 
@@ -563,8 +611,6 @@ function r0d_dir($dir_mask, $check_subdirs = false) {
                     continue;
                 }
 
-                // Use the same basename pattern for subdirectories
-                // if (($f !== '.') && ($f !== '..'))
                 r0d_dir($f . '/' . basename($dir_mask), $check_subdirs);
             }
         }

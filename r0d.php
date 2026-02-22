@@ -28,10 +28,11 @@ static $allow_filenames = [
 ];
 
 static $allow_extensions = [
-        'php', 'js', 'jsx', 'ts', 'tsx', 'vue', 'css', 'scss', 'less', 'html', 'htm', 'shtml', 'phtml',
+        'js', 'jsx', 'ts', 'tsx', 'mjs', 'vue', 'php', 'php5',
+        'css', 'scss', 'less', 'html', 'htm', 'shtml', 'phtml',
         'txt', 'md', 'conf', 'ini', 'htaccess', 'htpasswd', 'gitignore', 'sql',
-        'pl', 'cgi', 'asp', 'py', 'go', 'sh', 'bat', 'ps1', // 'pas',
-        'xml', 'csv', 'json', 'yaml', 'svg', 'glsl',
+        'pl', 'cgi', 'asp', 'py', 'go', 'sh', 'bat', 'cmd', 'ps1', // 'pas',
+        'xml', 'csv', 'json', 'jsonl', 'yaml', 'svg', 'glsl',
         'pem', 'ppk', 'yml', 'Dockerfile',
 
         // 'pas', 'c', 'cpp', 'h', // NO! Some legacy IDEs doesn't supports /n without /r.
@@ -43,6 +44,8 @@ $exclude_directories = [
     '.cache',
     '__pycache__',
     '.git',
+    '.next',
+    'vendor', // or 'sdk/vendor' (php specific)
     '_temp',
     'temp',
     'tmp',
